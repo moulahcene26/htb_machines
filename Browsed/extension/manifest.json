@@ -1,0 +1,9 @@
+{
+    "manifest_version": 3,
+    "name": "test ext",
+    "version": "2.2",
+    "background": {
+        "service_worker": "background.js"
+    },
+    "host_permissions": ["*://127.0.0.1/*", "*://localhost/*"]
+}
