@@ -92,3 +92,17 @@ funny af, you can hijack what Python interpreter it uses via environment variabl
 
 -- update : it's not working for some reason, ill check on it later 
 
+
+
+Hello from tomorrow, i found an article online about this priv vuln on needrestart 3.7, what appeared is that neerestart can take custom config files, so we can create an evil config file that contains instructions like opening a root as shell, and execute them as root without needing the password : \
+![alt text](image-7.png)\
+
+and voila !\
+![alt text](image-8.png)
+
+SOLVED !\
+![alt text](image-9.png)\
+I spent hours stuck in rabbit holes while the solution paths were really ez, but its alr since i'm still building my intuition one by one. \
+cya
+
+
