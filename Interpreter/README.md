@@ -99,7 +99,7 @@ and we got the password : ```snowflake1```
 
 ![alt text](image-5.png)\
 user flag done!, now for the root flag;\
-commands like "getcap" and "sudo -l" didn't work, so what i did is try to look for processes running currently as root :\
+commands like "getcap" and "sudo -l" didn't work, so what i did is try to look for processes running currently (python processes....) and if we find them running as root (which was the case):\
 
 ``` ps aux |  grep -E "python|java|node|php|ruby ```\
 and i got this :\
