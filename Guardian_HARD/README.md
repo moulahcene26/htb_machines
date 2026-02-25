@@ -159,7 +159,7 @@ so now we serve this html page and make the admin visit it: we save this page to
 ![alt text](image-27.png)\
 and we got a request:\
 ![alt text](image-28.png)\
-the admin visited it, so now we hope he created this new user with admin priveleges, let's try to login with it: ``` newAdmin:Admin123! ``` \
+the admin visited it, so now we hope he created this new user with admin priveleges, let's try to login with it: ``` bl0rph:Admin123! ``` \
 it's not logging in, we might have made a mistake idk, now we have to do the whole process from zero cuz the lecturer cookie is invalid now, ffs\
 
 
